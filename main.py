@@ -239,6 +239,8 @@ async def listar_reportes():
         for doc in reportes_ref:
             reporte = doc.to_dict()
             reporte['reporte_id'] = doc.id
+            if isinstance(reporte.get('timestamp'), datetime):
+                reporte['timestamp'] = reporte['timestamp'].isoformat()
             reportes.append(reporte)
         return reportes
     except Exception as e:
