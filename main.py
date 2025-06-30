@@ -44,7 +44,7 @@ try:
         cred = credentials.Certificate(KEY_FILENAME)
 
     firebase_admin.initialize_app(cred, {
-        'storageBucket': 'diagnostico-piezas-myd.appspot.com'
+        'storageBucket': 'diagnostico-piezas-myd.firebasestorage.app'
     })
     db = firestore.client()
     bucket = storage.bucket()
