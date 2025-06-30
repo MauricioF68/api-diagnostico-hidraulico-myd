@@ -30,7 +30,7 @@ app = FastAPI(
 MODEL_FILENAME = "modelo_diagnostico_v1.keras"
 PIEZA_ENCODER_FILENAME = "pieza_encoder.joblib"
 ESTADO_ENCODER_FILENAME = "estado_encoder.joblib"
-KEY_FILENAME = "ServiceAccountKey.json"
+KEY_FILENAME = "serviceAccountKey.json"
 
 required_files = [MODEL_FILENAME, PIEZA_ENCODER_FILENAME, ESTADO_ENCODER_FILENAME, KEY_FILENAME]
 for filename in required_files:
