@@ -1,0 +1,12 @@
+# Contenido para el archivo .gitignore
+
+# Entorno virtual de Python
+env/
+
+# Carpetas de caché de Python
+__pycache__/
+
+# Llave secreta de Firebase (¡NUNCA SUBIR!)
+serviceAccountKey.json
+
+Dataset_Piezas_Hidraulicas/
