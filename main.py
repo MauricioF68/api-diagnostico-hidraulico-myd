@@ -1,3 +1,5 @@
+# main.py - API de Diagnóstico (V6.7) - Corrección Final de Serialización de Fecha
+
 import io
 import os
 import uuid
@@ -6,7 +8,7 @@ import tensorflow as tf
 import firebase_admin
 import joblib
 import requests
-import json 
+import json
 from firebase_admin import credentials, firestore, storage
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -19,60 +21,55 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-
-print("--- Iniciando aplicación FastAPI (V. Despliegue) ---")
+# --- INICIALIZACIÓN DE LA APLICACIÓN ---
+print("--- Iniciando aplicación FastAPI (V6.7) ---")
 app = FastAPI(
     title="API de Diagnóstico de Piezas Hidráulicas",
     description="API final con diagnóstico, persistencia y gestión de reportes.",
     version="FINAL"
 )
 
-
+# --- INICIALIZACIÓN DE FIREBASE ---
 try:
-    
     credentials_json_str = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-    
     if credentials_json_str:
         print("-> Inicializando Firebase desde variable de entorno (modo nube)...")
         credentials_dict = json.loads(credentials_json_str)
         cred = credentials.Certificate(credentials_dict)
     else:
-        
         print("-> Inicializando Firebase desde archivo local (modo desarrollo)...")
-        KEY_FILENAME = "serviceAccountKey.json" 
+        KEY_FILENAME = "serviceAccountKey.json"
         if not os.path.exists(KEY_FILENAME):
-            raise FileNotFoundError(f"El archivo de credenciales '{KEY_FILENAME}' no se encontró para el desarrollo local.")
+            raise FileNotFoundError(f"El archivo de credenciales '{KEY_FILENAME}' no se encontró.")
         cred = credentials.Certificate(KEY_FILENAME)
 
     firebase_admin.initialize_app(cred, {
-        'storageBucket': 'diagnostico-piezas-myd.firebasestorage.app'
+        'storageBucket': 'diagnostico-piezas-myd.appspot.com'
     })
     db = firestore.client()
     bucket = storage.bucket()
     print("-> Conexión con Firestore y Storage establecida exitosamente.")
 except Exception as e:
-    print(f"¡Error Crítico al conectar con Firebase! Revisa la variable de entorno o el archivo de llave. Error: {e}")
+    print(f"¡Error Crítico al conectar con Firebase! Error: {e}")
     db = None
     bucket = None
 
+# --- CARGA DE ARTEFACTOS ---
 MODEL_FILENAME = "modelo_diagnostico_v1.keras"
 PIEZA_ENCODER_FILENAME = "pieza_encoder.joblib"
 ESTADO_ENCODER_FILENAME = "estado_encoder.joblib"
 
-
 required_files = [MODEL_FILENAME, PIEZA_ENCODER_FILENAME, ESTADO_ENCODER_FILENAME]
 for filename in required_files:
     if not os.path.exists(filename):
-        raise RuntimeError(f"¡Error Crítico! No se encontró el archivo '{filename}'.")
+        raise RuntimeError(f"¡Error Crítico! No se encontró el archivo de artefacto '{filename}'.")
 
 model = tf.keras.models.load_model(MODEL_FILENAME)
 pieza_encoder = joblib.load(PIEZA_ENCODER_FILENAME)
 estado_encoder = joblib.load(ESTADO_ENCODER_FILENAME)
 print("-> Modelo y traductores cargados exitosamente.")
 
-
-
-
+# --- CONFIGURACIÓN GLOBAL Y FUNCIONES AUXILIARES ---
 IMG_SIZE = (160, 160)
 ESTADO_PRIORIDAD = {estado: i for i, estado in enumerate(['optimo', 'desgaste', 'corrosion', 'ruptura'])}
 
@@ -102,9 +99,11 @@ def guardar_reporte(reporte_data: dict, reporte_id: str):
     except Exception as e:
         print(f"Error al guardar el reporte en Firestore: {e}")
 
+# --- ENDPOINTS DE LA API ---
+
 @app.get("/", summary="Endpoint raíz de bienvenida")
 def read_root():
-    return {"mensaje": "Bienvenido a la API de Diagnóstico (V6.3). Vaya a /docs."}
+    return {"mensaje": "Bienvenido a la API de Diagnóstico. Vaya a /docs."}
 
 @app.post("/diagnosticar/", summary="Diagnosticar pieza desde 5 vistas y guardar imágenes")
 async def diagnosticar_pieza_multivista(files: List[UploadFile] = File(..., description="Cargue exactamente 5 imágenes de la pieza.")):
@@ -154,6 +153,44 @@ async def diagnosticar_pieza_multivista(files: List[UploadFile] = File(..., desc
     guardar_reporte(reporte, reporte_id)
     return reporte
 
+@app.get("/reportes/", summary="Listar todos los reportes guardados")
+async def listar_reportes():
+    if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
+    try:
+        reportes_ref = db.collection('reportes').stream()
+        reportes = []
+        for doc in reportes_ref:
+            reporte = doc.to_dict()
+            reporte['reporte_id'] = doc.id
+            
+            # *** CORRECCIÓN CRUCIAL AQUÍ ***
+            # Si el campo 'timestamp' existe, lo convertimos a un formato de texto estándar (ISO 8601)
+            # antes de enviarlo. Esto evita el error de serialización.
+            if reporte.get('timestamp'):
+                reporte['timestamp'] = reporte['timestamp'].isoformat()
+            
+            reportes.append(reporte)
+        return reportes
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener reportes: {e}")
+
+@app.delete("/reportes/{reporte_id}", summary="Eliminar un reporte específico")
+async def eliminar_reporte(reporte_id: str):
+    if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
+    try:
+        blobs = bucket.list_blobs(prefix=f"reportes/{reporte_id}/")
+        for blob in blobs:
+            blob.delete()
+            print(f"-> Imagen {blob.name} eliminada de Storage.")
+        
+        reporte_ref = db.collection('reportes').document(reporte_id)
+        if not reporte_ref.get().exists:
+            raise HTTPException(status_code=404, detail="Reporte no encontrado.")
+        reporte_ref.delete()
+        return {"mensaje": f"Reporte {reporte_id} y sus imágenes han sido eliminados."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar el reporte: {e}")
+
 @app.get("/reportes/{reporte_id}/excel", summary="Descargar reporte profesional en Excel")
 async def descargar_excel(reporte_id: str):
     if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
@@ -174,12 +211,21 @@ async def descargar_excel(reporte_id: str):
     ws.merge_cells('A1:E1')
     ws['A1'].font = font_titulo
     ws['A1'].alignment = alineacion_centro
-    
     ws['A1'].fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
     ws.row_dimensions[1].height = 30
 
+    # *** CORRECCIÓN CRUCIAL AQUÍ TAMBIÉN ***
+    # Nos aseguramos de manejar la fecha correctamente, ya sea que venga como objeto o como texto.
+    timestamp_obj = reporte.get('timestamp')
+    if isinstance(timestamp_obj, datetime):
+        fecha_str = timestamp_obj.strftime("%Y-%m-%d %H:%M:%S")
+    elif isinstance(timestamp_obj, str):
+        fecha_str = timestamp_obj
+    else:
+        fecha_str = "N/A"
+        
     ws['A3'] = "ID del Reporte:"; ws['B3'] = reporte_id
-    ws['A4'] = "Fecha (UTC):"; ws['B4'] = reporte.get('timestamp').strftime("%Y-%m-%d %H:%M:%S") if isinstance(reporte.get('timestamp'), datetime) else "N/A"
+    ws['A4'] = "Fecha (UTC):"; ws['B4'] = fecha_str
     
     ws['A6'] = "RESULTADOS DEL DIAGNÓSTICO"; ws['A6'].font = font_header
     ws['A7'] = "Pieza Identificada:"; ws['B7'] = reporte.get('pieza_identificada')
@@ -229,38 +275,3 @@ async def descargar_excel(reporte_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=reporte_{reporte_id}.xlsx"}
     )
-    
-@app.get("/reportes/", summary="Listar todos los reportes guardados")
-async def listar_reportes():
-    if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
-    try:
-        reportes_ref = db.collection('reportes').stream()
-        reportes = []
-        for doc in reportes_ref:
-            reporte = doc.to_dict()
-            reporte['reporte_id'] = doc.id
-            if isinstance(reporte.get('timestamp'), datetime):
-                reporte['timestamp'] = reporte['timestamp'].isoformat()
-            reportes.append(reporte)
-        return reportes
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al obtener reportes: {e}")
-
-@app.delete("/reportes/{reporte_id}", summary="Eliminar un reporte específico")
-async def eliminar_reporte(reporte_id: str):
-    if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
-    try:
-       
-        blobs = bucket.list_blobs(prefix=f"reportes/{reporte_id}/")
-        for blob in blobs:
-            blob.delete()
-            print(f"-> Imagen {blob.name} eliminada de Storage.")
-        
-        
-        reporte_ref = db.collection('reportes').document(reporte_id)
-        if not reporte_ref.get().exists:
-            raise HTTPException(status_code=404, detail="Reporte no encontrado.")
-        reporte_ref.delete()
-        return {"mensaje": f"Reporte {reporte_id} y sus imágenes han sido eliminados."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al eliminar el reporte: {e}")
