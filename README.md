@@ -60,9 +60,9 @@ estado_encoder.joblib
 2. Configuración del Entorno
 Bash
 
-# 1. Clona el repositorio (si estás en una nueva máquina)
-# git clone https://github.com/tu_usuario/api-diagnostico-hidraulico.git
-# cd api-diagnostico-hidraulico
+# 1. Clona el repositorio 
+# git clone https://github.com/MauricioF68/api-diagnostico-hidraulico-myd.git
+# cd api-diagnostico-hidraulico-myd
 
 # 2. Crea un entorno virtual
 python -m venv env
