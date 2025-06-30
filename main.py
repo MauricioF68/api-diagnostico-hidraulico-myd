@@ -6,6 +6,7 @@ import tensorflow as tf
 import firebase_admin
 import joblib
 import requests
+import json 
 from firebase_admin import credentials, firestore, storage
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -19,41 +20,58 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
 
-print("--- Iniciando aplicación FastAPI (V6.3) ---")
+print("--- Iniciando aplicación FastAPI (V. Despliegue) ---")
 app = FastAPI(
-    title="API de Diagnóstico de Piezas Hidráulicas (V6.3)",
-    description="API final con generación de reportes Excel profesionales.",
-    version="6.3.0"
+    title="API de Diagnóstico de Piezas Hidráulicas",
+    description="API final con diagnóstico, persistencia y gestión de reportes.",
+    version="FINAL"
 )
 
 
-MODEL_FILENAME = "modelo_diagnostico_v1.keras"
-PIEZA_ENCODER_FILENAME = "pieza_encoder.joblib"
-ESTADO_ENCODER_FILENAME = "estado_encoder.joblib"
-KEY_FILENAME = "serviceAccountKey.json"
-
-required_files = [MODEL_FILENAME, PIEZA_ENCODER_FILENAME, ESTADO_ENCODER_FILENAME, KEY_FILENAME]
-for filename in required_files:
-    if not os.path.exists(filename):
-        raise RuntimeError(f"¡Error Crítico! No se encontró el archivo '{filename}'.")
-
-
 try:
-    cred = credentials.Certificate(KEY_FILENAME)
+    
+    credentials_json_str = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    
+    if credentials_json_str:
+        print("-> Inicializando Firebase desde variable de entorno (modo nube)...")
+        credentials_dict = json.loads(credentials_json_str)
+        cred = credentials.Certificate(credentials_dict)
+    else:
+        
+        print("-> Inicializando Firebase desde archivo local (modo desarrollo)...")
+        KEY_FILENAME = "serviceAccountKey.json" 
+        if not os.path.exists(KEY_FILENAME):
+            raise FileNotFoundError(f"El archivo de credenciales '{KEY_FILENAME}' no se encontró para el desarrollo local.")
+        cred = credentials.Certificate(KEY_FILENAME)
+
     firebase_admin.initialize_app(cred, {
-        'storageBucket': 'diagnostico-piezas-myd.firebasestorage.app'
+        'storageBucket': 'diagnostico-piezas-myd.appspot.com'
     })
     db = firestore.client()
     bucket = storage.bucket()
     print("-> Conexión con Firestore y Storage establecida exitosamente.")
 except Exception as e:
-    print(f"¡Error Crítico al conectar con Firebase! Error: {e}")
+    print(f"¡Error Crítico al conectar con Firebase! Revisa la variable de entorno o el archivo de llave. Error: {e}")
     db = None
     bucket = None
+
+MODEL_FILENAME = "modelo_diagnostico_v1.keras"
+PIEZA_ENCODER_FILENAME = "pieza_encoder.joblib"
+ESTADO_ENCODER_FILENAME = "estado_encoder.joblib"
+
+
+required_files = [MODEL_FILENAME, PIEZA_ENCODER_FILENAME, ESTADO_ENCODER_FILENAME]
+for filename in required_files:
+    if not os.path.exists(filename):
+        raise RuntimeError(f"¡Error Crítico! No se encontró el archivo '{filename}'.")
+
 model = tf.keras.models.load_model(MODEL_FILENAME)
 pieza_encoder = joblib.load(PIEZA_ENCODER_FILENAME)
 estado_encoder = joblib.load(ESTADO_ENCODER_FILENAME)
 print("-> Modelo y traductores cargados exitosamente.")
+
+
+
 
 IMG_SIZE = (160, 160)
 ESTADO_PRIORIDAD = {estado: i for i, estado in enumerate(['optimo', 'desgaste', 'corrosion', 'ruptura'])}
@@ -70,21 +88,19 @@ def generar_sugerencia(estado: str) -> str:
     sugerencias = {
         "ruptura": "¡ALERTA MÁXIMA! Pieza presenta rupturas , pudo haber sido causado por impactos de sólidos o sobrepresión; reemplace el impulsor e investigue la causa raíz en el sistema",
         "corrosion": "Atención: La pieza presenta corrosion , pudo haber sido causado por ataque químico del fluido; reemplace por un material compatible y analice el fluido. La corrosión puede comprometer la integridad estructural...",
-        "desgaste": "La pieza muestra desgaste , pudo haber sido por  abrasión de partículas o por cavitación; reemplace y corrija el sistema (filtrado o condiciones de succión).",
+        "desgaste": "La pieza muestra desgaste , pudo haber sido por abrasión de partículas o por cavitación; reemplace y corrija el sistema (filtrado o condiciones de succión).",
         "optimo": "Condición ideal. La pieza está en perfecto estado..."
     }
     return sugerencias.get(estado, "No se ha podido determinar una sugerencia clara.")
 
-def guardar_reporte(reporte_data: dict):
+def guardar_reporte(reporte_data: dict, reporte_id: str):
     if db is None: return
     try:
-        reporte_id = reporte_data["reporte_id"]
         reportes_ref = db.collection('reportes')
         reportes_ref.document(reporte_id).set(reporte_data)
         print(f"-> Reporte {reporte_id} guardado en Firestore.")
     except Exception as e:
         print(f"Error al guardar el reporte en Firestore: {e}")
-
 
 @app.get("/", summary="Endpoint raíz de bienvenida")
 def read_root():
@@ -134,7 +150,8 @@ async def diagnosticar_pieza_multivista(files: List[UploadFile] = File(..., desc
         "diagnosticos_individuales": estados_predichos,
         "urls_imagenes": urls_imagenes
     }
-    guardar_reporte(reporte)
+    
+    guardar_reporte(reporte, reporte_id)
     return reporte
 
 @app.get("/reportes/{reporte_id}/excel", summary="Descargar reporte profesional en Excel")
@@ -231,10 +248,17 @@ async def listar_reportes():
 async def eliminar_reporte(reporte_id: str):
     if db is None: raise HTTPException(status_code=503, detail="Servicio de base de datos no disponible.")
     try:
+       
+        blobs = bucket.list_blobs(prefix=f"reportes/{reporte_id}/")
+        for blob in blobs:
+            blob.delete()
+            print(f"-> Imagen {blob.name} eliminada de Storage.")
+        
+        
         reporte_ref = db.collection('reportes').document(reporte_id)
         if not reporte_ref.get().exists:
             raise HTTPException(status_code=404, detail="Reporte no encontrado.")
         reporte_ref.delete()
-        return {"mensaje": f"Reporte {reporte_id} eliminado exitosamente."}
+        return {"mensaje": f"Reporte {reporte_id} y sus imágenes han sido eliminados."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar el reporte: {e}")
